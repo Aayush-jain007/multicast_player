@@ -1,0 +1,228 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>RTP Multicast Player</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/js/all.min.js"></script>
+<link rel="stylesheet" href="index.css">
+<script>
+  tailwind.config = {
+    theme: {
+      extend: {
+        colors: {
+          primary: '#3b82f6',
+          secondary: '#64748b',
+          accent: '#06b6d4',
+          success: '#10b981',
+          warning: '#f59e0b',
+          danger: '#ef4444',
+          bgDark: '#0f172a',
+          panel: '#1e293b',
+          surface: '#334155'
+        }
+      }
+    }
+  }
+</script>
+</head>
+<body class="bg-bgDark text-white h-screen flex flex-col overflow-hidden">
+  
+  <!-- Header -->
+  <div class="gradient-bg p-6 shadow-lg">
+    <div class="flex items-center justify-between">
+      <div class="flex items-center space-x-3">
+        <i class="fas fa-broadcast-tower text-3xl"></i>
+        <div>
+          <h1 class="text-2xl font-bold">RTP Multicast Player</h1>
+          <p class="text-blue-100 text-sm">Professional Audio Stream Receiver</p>
+        </div>
+      </div>
+      <div class="flex items-center space-x-4">
+        <div id="statusIndicator" class="status-indicator flex items-center space-x-2 px-3 py-2 rounded-full bg-red-500/20 border border-red-500/30">
+          <div class="w-2 h-2 rounded-full bg-red-500"></div>
+          <span class="text-sm font-medium">Disconnected</span>
+        </div>
+        <button id="settingsBtn" class="p-2 rounded-lg bg-white/10 hover:bg-white/20 transition-colors" title="Settings">
+          <i class="fas fa-cog"></i>
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Main Content -->
+  <div class="flex-1 flex overflow-hidden">
+    
+    <!-- Control Panel -->
+    <div class="w-96 p-6 bg-panel border-r border-surface">
+      
+      <!-- Connection Settings -->
+      <div class="space-y-4">
+        <h2 class="text-lg font-semibold flex items-center space-x-2">
+          <i class="fas fa-network-wired text-accent"></i>
+          <span>Connection Settings</span>
+        </h2>
+        
+        <div class="space-y-3">
+          <div>
+            <label class="text-sm font-medium text-gray-300 block mb-2">Multicast Address</label>
+            <div class="relative">
+              <i class="fas fa-globe absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-400"></i>
+              <input id="address" value="239.100.0.1" placeholder="Enter multicast address"
+                     class="w-full pl-10 pr-4 py-3 rounded-lg bg-surface border border-gray-600 focus:outline-none focus:ring-2 focus:ring-accent focus:border-transparent transition-all" />
+            </div>
+          </div>
+          
+          <div>
+            <label class="text-sm font-medium text-gray-300 block mb-2">Port</label>
+            <div class="relative">
+              <i class="fas fa-plug absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-400"></i>
+              <input id="port" value="5008" placeholder="Enter port number"
+                     class="w-full pl-10 pr-4 py-3 rounded-lg bg-surface border border-gray-600 focus:outline-none focus:ring-2 focus:ring-accent focus:border-transparent transition-all" />
+            </div>
+          </div>
+          
+          <div>
+            <label class="text-sm font-medium text-gray-300 block mb-2">Output Device</label>
+            <div class="relative">
+              <i class="fas fa-volume-up absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-400"></i>
+              <select id="outputDevice"
+                      class="w-full pl-10 pr-4 py-3 rounded-lg bg-surface border border-gray-600 focus:outline-none focus:ring-2 focus:ring-accent focus:border-transparent transition-all appearance-none">
+                <option value="">Select audio device...</option>
+              </select>
+              <i class="fas fa-chevron-down absolute right-3 top-1/2 transform -translate-y-1/2 text-gray-400 pointer-events-none"></i>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Audio Controls -->
+      <div class="mt-8 space-y-4">
+        <h2 class="text-lg font-semibold flex items-center space-x-2">
+          <i class="fas fa-sliders-h text-accent"></i>
+          <span>Audio Controls</span>
+        </h2>
+        
+        <div class="space-y-3">
+          <div>
+            <label class="text-sm font-medium text-gray-300 block mb-2">Volume</label>
+            <div class="flex items-center space-x-3">
+              <i class="fas fa-volume-down text-gray-400"></i>
+              <input id="volumeSlider" type="range" min="0" max="100" value="100"
+                     class="flex-1 h-2 bg-gray-600 rounded-lg appearance-none cursor-pointer slider" />
+              <i class="fas fa-volume-up text-gray-400"></i>
+              <span id="volumeValue" class="text-sm font-mono w-12 text-right">100%</span>
+            </div>
+          </div>
+          
+          <div>
+            <label class="text-sm font-medium text-gray-300 block mb-2">Audio Level</label>
+            <div class="h-4 bg-gray-800 rounded-lg overflow-hidden">
+              <div id="audioMeter" class="audio-meter h-full w-0 transition-all duration-100"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Stream Controls -->
+      <div class="mt-8 space-y-4">
+        <h2 class="text-lg font-semibold flex items-center space-x-2">
+          <i class="fas fa-play-circle text-accent"></i>
+          <span>Stream Controls</span>
+        </h2>
+        
+        <div class="grid grid-cols-2 gap-3">
+          <button id="start" class="flex items-center justify-center space-x-2 py-3 px-4 rounded-lg bg-success hover:bg-green-600 text-white font-semibold transition-all transform hover:scale-105">
+            <i class="fas fa-play"></i>
+            <span>Start</span>
+          </button>
+          <button id="stop" class="flex items-center justify-center space-x-2 py-3 px-4 rounded-lg bg-danger hover:bg-red-600 text-white font-semibold transition-all transform hover:scale-105">
+            <i class="fas fa-stop"></i>
+            <span>Stop</span>
+          </button>
+        </div>
+      </div>
+
+      <!-- Statistics -->
+      <div class="mt-8 space-y-4">
+        <h2 class="text-lg font-semibold flex items-center space-x-2">
+          <i class="fas fa-chart-line text-accent"></i>
+          <span>Statistics</span>
+        </h2>
+        
+        <div class="space-y-2 text-sm">
+          <div class="flex justify-between">
+            <span class="text-gray-400">Status:</span>
+            <span id="streamStatus" class="font-mono">Idle</span>
+          </div>
+          <div class="flex justify-between">
+            <span class="text-gray-400">Duration:</span>
+            <span id="streamDuration" class="font-mono">00:00:00</span>
+          </div>
+          <div class="flex justify-between">
+            <span class="text-gray-400">Packets:</span>
+            <span id="packetCount" class="font-mono">0</span>
+          </div>
+          <div class="flex justify-between">
+            <span class="text-gray-400">Bitrate:</span>
+            <span id="bitrate" class="font-mono">0 kbps</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Log Panel -->
+    <div class="flex-1 flex flex-col">
+      <div class="p-4 bg-surface border-b border-gray-600">
+        <div class="flex items-center justify-between">
+          <h2 class="text-lg font-semibold flex items-center space-x-2">
+            <i class="fas fa-terminal text-accent"></i>
+            <span>Stream Log</span>
+          </h2>
+          <div class="flex items-center space-x-2">
+            <button id="clearLog" class="px-3 py-1 rounded bg-gray-600 hover:bg-gray-500 text-sm transition-colors">
+              <i class="fas fa-trash mr-1"></i>Clear
+            </button>
+            <button id="toggleAutoScroll" class="px-3 py-1 rounded bg-accent hover:bg-cyan-600 text-sm transition-colors">
+              <i class="fas fa-scroll mr-1"></i>Auto-scroll
+            </button>
+          </div>
+        </div>
+      </div>
+      
+      <div id="log" class="flex-1 bg-black p-4 font-mono text-sm overflow-y-auto">
+        <div class="text-gray-500 italic">[Logs will appear here...]</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Settings Modal (Hidden by default) -->
+  <div id="settingsModal" class="fixed inset-0 bg-black/50 hidden items-center justify-center z-50">
+    <div class="bg-panel rounded-lg p-6 w-96 max-w-full mx-4">
+      <div class="flex items-center justify-between mb-4">
+        <h3 class="text-lg font-semibold">Settings</h3>
+        <button id="closeSettings" class="text-gray-400 hover:text-white">
+          <i class="fas fa-times"></i>
+        </button>
+      </div>
+      <div class="space-y-4">
+        <div>
+          <label class="text-sm font-medium block mb-2">Auto-reconnect</label>
+          <input type="checkbox" id="autoReconnect" class="mr-2">
+          <span class="text-sm">Automatically reconnect on connection loss</span>
+        </div>
+        <div>
+          <label class="text-sm font-medium block mb-2">Buffer Size</label>
+          <select id="bufferSize" class="w-full p-2 rounded bg-surface border border-gray-600">
+            <option value="1024">1024 samples</option>
+            <option value="2048">2048 samples</option>
+            <option value="4096">4096 samples</option>
+          </select>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="renderer.js"></script>
+</body>
+</html>
