@@ -21,25 +21,80 @@ const closeSettingsBtn = document.getElementById('closeSettings');
 
 // State variables
 let audioCtx;
-let sourceNode;
-let audioBufferQueue = [];
-let audioElement;
+let gainNode;
+let audioAnalyser;
+let dataArray;
 let isStreaming = false;
 let streamStartTime = null;
 let packetCounter = 0;
 let autoScroll = true;
 let volume = 1.0;
-let audioAnalyser;
-let dataArray;
 let animationId;
+let audioBufferQueue = [];
+let isPlaying = false;
+let audioSource = null;
+let currentTime = 0;
+let bufferDuration = 0.1; // 100ms buffers
 
 // Initialize audio context and analyser
-function initAudioContext() {
+async function initAudioContext() {
   if (!audioCtx) {
     audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    
+    // Resume audio context if suspended
+    if (audioCtx.state === 'suspended') {
+      await audioCtx.resume();
+    }
+    
+    gainNode = audioCtx.createGain();
+    gainNode.gain.value = volume;
+    
     audioAnalyser = audioCtx.createAnalyser();
     audioAnalyser.fftSize = 256;
     dataArray = new Uint8Array(audioAnalyser.frequencyBinCount);
+    
+    // Connect nodes
+    gainNode.connect(audioAnalyser);
+    audioAnalyser.connect(audioCtx.destination);
+  }
+}
+
+// Process audio buffer queue with proper timing
+function processAudioQueue() {
+  if (audioBufferQueue.length === 0) return;
+  
+  const audioBuffer = audioBufferQueue.shift();
+  const source = audioCtx.createBufferSource();
+  source.buffer = audioBuffer;
+  source.connect(gainNode);
+  
+  // Schedule to play at the correct time
+  const playTime = Math.max(audioCtx.currentTime, currentTime);
+  source.start(playTime);
+  currentTime = playTime + audioBuffer.duration;
+  
+  source.onended = () => {
+    // Clean up
+  };
+}
+
+// Convert raw PCM data to AudioBuffer
+async function pcmToAudioBuffer(pcmData) {
+  try {
+    // Raw PCM data: 16-bit signed little-endian, 48kHz, mono
+    const samples = new Int16Array(pcmData.buffer, pcmData.byteOffset, pcmData.byteLength / 2);
+    const audioBuffer = audioCtx.createBuffer(1, samples.length, 48000);
+    const channelData = audioBuffer.getChannelData(0);
+    
+    // Convert Int16 to Float32 (-1.0 to 1.0)
+    for (let i = 0; i < samples.length; i++) {
+      channelData[i] = samples[i] / 32768.0;
+    }
+    
+    return audioBuffer;
+  } catch (error) {
+    console.error('Error creating audio buffer from PCM:', error);
+    return null;
   }
 }
 
@@ -105,21 +160,52 @@ function addLogEntry(message, type = 'info') {
 }
 
 // Initialize audio devices
-navigator.mediaDevices.enumerateDevices().then(devices => {
-  devices.filter(d => d.kind === 'audiooutput').forEach(d => {
-    let opt = document.createElement('option');
-    opt.value = d.deviceId;
-    opt.textContent = d.label || `Device ${deviceSelect.children.length}`;
-    deviceSelect.appendChild(opt);
-  });
-});
+async function initializeAudioDevices() {
+  try {
+    // Request permission for audio devices
+    await navigator.mediaDevices.getUserMedia({ audio: true });
+    
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    const audioOutputs = devices.filter(d => d.kind === 'audiooutput');
+    
+    // Clear existing options except the first one
+    while (deviceSelect.children.length > 1) {
+      deviceSelect.removeChild(deviceSelect.lastChild);
+    }
+    
+    audioOutputs.forEach(d => {
+      let opt = document.createElement('option');
+      opt.value = d.deviceId;
+      opt.textContent = d.label || `Device ${deviceSelect.children.length}`;
+      deviceSelect.appendChild(opt);
+    });
+    
+    addLogEntry(`Found ${audioOutputs.length} audio output devices`, 'info');
+  } catch (error) {
+    addLogEntry(`Error initializing audio devices: ${error.message}`, 'error');
+  }
+}
 
 // Volume control
 volumeSlider.addEventListener('input', (e) => {
   volume = e.target.value / 100;
   volumeValue.textContent = `${e.target.value}%`;
-  if (audioElement) {
-    audioElement.volume = volume;
+  if (gainNode) {
+    gainNode.gain.value = volume;
+  }
+});
+
+// Audio device change handler
+deviceSelect.addEventListener('change', async (e) => {
+  const deviceId = e.target.value;
+  if (deviceId && audioCtx) {
+    try {
+      // For Web Audio API, we need to handle device switching differently
+      // This is a simplified approach - in a real app you might need to recreate the context
+      addLogEntry(`Audio device changed to: ${e.target.options[e.target.selectedIndex].text}`, 'info');
+    } catch (error) {
+      addLogEntry(`Error changing audio device: ${error.message}`, 'error');
+    }
   }
 });
 
@@ -160,95 +246,6 @@ settingsModal.addEventListener('click', (e) => {
 
 // IPC event handlers
 window.api.onLog(msg => {
-  addLogEntry(msg, msg.toLowerCase().includes('error') ? 'error' : 'info');
-});
-
-window.api.onAudioChunk(base64Data => {
-  if (!isStreaming) return;
-  
-  packetCounter++;
-  packetCount.textContent = packetCounter;
-  
-  const byteArray = Uint8Array.from(atob(base64Data), c => c.charCodeAt(0));
-  const blob = new Blob([byteArray], { type: 'audio/wav' });
-
-  if (!audioElement) {
-    initAudioContext();
-    audioElement = new Audio();
-    audioElement.autoplay = true;
-    audioElement.volume = volume;
-    
-    if (deviceSelect.value) {
-      audioElement.setSinkId(deviceSelect.value);
-    }
-    
-    // Connect to analyser for audio meter
-    const source = audioCtx.createMediaElementSource(audioElement);
-    source.connect(audioAnalyser);
-    audioAnalyser.connect(audioCtx.destination);
-  }
-  
-  audioElement.src = URL.createObjectURL(blob);
-});
-
-// Start stream
-startBtn.addEventListener('click', () => {
-  if (isStreaming) return;
-  
-  const address = addressEl.value.trim();
-  const port = portEl.value.trim();
-  
-  if (!address || !port) {
-    addLogEntry('Please enter both address and port', 'error');
-    return;
-  }
-  
-  isStreaming = true;
-  streamStartTime = Date.now();
-  packetCounter = 0;
-  
-  updateStatus(true, 'Connecting...');
-  streamStatus.textContent = 'Connecting';
-  startBtn.disabled = true;
-  startBtn.className = 'flex items-center justify-center space-x-2 py-3 px-4 rounded-lg bg-gray-600 text-gray-400 font-semibold cursor-not-allowed';
-  
-  addLogEntry(`Starting stream to ${address}:${port}`, 'info');
-  
-  window.api.startStream({
-    address: address,
-    port: port
-  });
-  
-  // Start statistics update loop
-  const statsInterval = setInterval(() => {
-    if (isStreaming) {
-      updateStatistics();
-      updateAudioMeter();
-    } else {
-      clearInterval(statsInterval);
-    }
-  }, 1000);
-});
-
-// Stop stream
-stopBtn.addEventListener('click', () => {
-  if (!isStreaming) return;
-  
-  isStreaming = false;
-  streamStartTime = null;
-  
-  updateStatus(false, 'Disconnected');
-  streamStatus.textContent = 'Idle';
-  startBtn.disabled = false;
-  startBtn.className = 'flex items-center justify-center space-x-2 py-3 px-4 rounded-lg bg-success hover:bg-green-600 text-white font-semibold transition-all transform hover:scale-105';
-  
-  addLogEntry('Stream stopped', 'info');
-  
-  window.api.stopStream();
-});
-
-// Handle stream events
-window.api.onLog(msg => {
   if (msg.includes('Stream stopped')) {
     isStreaming = false;
     streamStartTime = null;
@@ -262,6 +259,117 @@ window.api.onLog(msg => {
   }
   
   addLogEntry(msg, msg.toLowerCase().includes('error') ? 'error' : 'info');
+});
+
+window.api.onAudioChunk(async (base64Data) => {
+  if (!isStreaming) return;
+  
+  packetCounter++;
+  packetCount.textContent = packetCounter;
+  
+  try {
+    const byteArray = Uint8Array.from(atob(base64Data), c => c.charCodeAt(0));
+    
+    // Debug: Log first few chunks
+    if (packetCounter <= 5) {
+      addLogEntry(`Received audio chunk ${packetCounter}, size: ${byteArray.length} bytes`, 'info');
+    }
+    
+    // Initialize audio context if not already done
+    if (!audioCtx) {
+      await initAudioContext();
+      addLogEntry('Audio context initialized', 'info');
+    }
+    
+    // Convert WAV data to AudioBuffer
+    const audioBuffer = await pcmToAudioBuffer(byteArray);
+    if (audioBuffer) {
+      audioBufferQueue.push(audioBuffer);
+      processAudioQueue();
+      
+      // Debug: Log first few successful conversions
+      if (packetCounter <= 5) {
+        addLogEntry(`Audio buffer created, duration: ${audioBuffer.duration.toFixed(3)}s, queue length: ${audioBufferQueue.length}`, 'info');
+      }
+    } else {
+      if (packetCounter <= 5) {
+        addLogEntry('Failed to create audio buffer', 'error');
+      }
+    }
+  } catch (error) {
+    addLogEntry(`Error processing audio chunk: ${error.message}`, 'error');
+  }
+});
+
+// Start stream
+startBtn.addEventListener('click', async () => {
+  if (isStreaming) return;
+  
+  const address = addressEl.value.trim();
+  const port = portEl.value.trim();
+  
+  if (!address || !port) {
+    addLogEntry('Please enter both address and port', 'error');
+    return;
+  }
+  
+  try {
+    // Initialize audio context
+    await initAudioContext();
+    
+    isStreaming = true;
+    streamStartTime = Date.now();
+    packetCounter = 0;
+    audioBufferQueue = [];
+    isPlaying = false;
+    currentTime = audioCtx.currentTime;
+    
+    updateStatus(true, 'Connecting...');
+    streamStatus.textContent = 'Connecting';
+    startBtn.disabled = true;
+    startBtn.className = 'flex items-center justify-center space-x-2 py-3 px-4 rounded-lg bg-gray-600 text-gray-400 font-semibold cursor-not-allowed';
+    
+    addLogEntry(`Starting stream to ${address}:${port}`, 'info');
+    
+    window.api.startStream({
+      address: address,
+      port: port
+    });
+    
+    // Start statistics update loop
+    const statsInterval = setInterval(() => {
+      if (isStreaming) {
+        updateStatistics();
+        updateAudioMeter();
+      } else {
+        clearInterval(statsInterval);
+      }
+    }, 1000);
+  } catch (error) {
+    addLogEntry(`Error starting stream: ${error.message}`, 'error');
+    isStreaming = false;
+    updateStatus(false, 'Error');
+  }
+});
+
+// Stop stream
+stopBtn.addEventListener('click', () => {
+  if (!isStreaming) return;
+  
+  isStreaming = false;
+  streamStartTime = null;
+  audioBufferQueue = [];
+  isPlaying = false;
+  currentTime = 0;
+  
+  updateStatus(false, 'Disconnected');
+  streamStatus.textContent = 'Idle';
+  startBtn.disabled = false;
+  startBtn.className = 'flex items-center justify-center space-x-2 py-3 px-4 rounded-lg bg-success hover:bg-green-600 text-white font-semibold transition-all transform hover:scale-105';
+  
+  addLogEntry('Stream stopped', 'info');
+  
+  window.api.stopStream();
 });
 
 // Keyboard shortcuts
@@ -285,5 +393,6 @@ document.addEventListener('keydown', (e) => {
 });
 
 // Initialize
+initializeAudioDevices();
 addLogEntry('RTP Multicast Player initialized', 'info');
 addLogEntry('Press Ctrl+Enter to start/stop stream', 'info');

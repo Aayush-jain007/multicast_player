@@ -4,9 +4,11 @@ const { spawn } = require('child_process');
 const fs = require('fs');
 const os = require('os');
 
+// State variables
 let win;
 let ffmpegProc;
 let currentSdpFile = null;
+let isWindowDestroyed = false;
 
 // Generate SDP file content for RTP stream
 function generateSdpContent(address, port) {
@@ -77,6 +79,12 @@ function createWindow() {
     }
   });
   win.loadFile('index.html');
+  
+  // Track window destruction
+  win.on('closed', () => {
+    isWindowDestroyed = true;
+    win = null;
+  });
 }
 
 app.whenReady().then(createWindow);
@@ -94,7 +102,7 @@ ipcMain.handle('start-stream', (_, { address, port }) => {
       '-acodec', 'pcm_s16le',
       '-ar', '48000',
       '-ac', '1',
-      '-f', 'wav',
+      '-f', 's16le',
       'pipe:1'
     ];
 
@@ -104,30 +112,33 @@ ipcMain.handle('start-stream', (_, { address, port }) => {
     console.log('Launching ffmpeg from:', ffmpegPath);
     console.log('Using SDP file:', currentSdpFile);
 
+    // Send log to renderer
+    safeSendToRenderer('log', 'Launching ffmpeg...');
+
     ffmpegProc = spawn(ffmpegPath, args);
 
     ffmpegProc.stdout.on('data', chunk => {
-      win.webContents.send('audio-chunk', chunk.toString('base64'));
+      safeSendToRenderer('audio-chunk', chunk.toString('base64'));
     });
 
     ffmpegProc.stderr.on('data', data => {
-      win.webContents.send('log', data.toString());
+      safeSendToRenderer('log', data.toString());
     });
 
     ffmpegProc.on('error', (error) => {
       console.error('FFmpeg spawn error:', error);
-      win.webContents.send('log', `FFmpeg Error: ${error.message}`);
+      safeSendToRenderer('log', `FFmpeg Error: ${error.message}`);
       cleanupSdpFile();
     });
 
     ffmpegProc.on('close', () => {
-      win.webContents.send('log', 'Stream stopped');
+      safeSendToRenderer('log', 'Stream stopped');
       cleanupSdpFile();
     });
     
   } catch (error) {
     console.error('Failed to start stream:', error);
-    win.webContents.send('log', `Failed to start stream: ${error.message}`);
+    safeSendToRenderer('log', `Failed to start stream: ${error.message}`);
     cleanupSdpFile();
   }
 });
@@ -144,4 +155,35 @@ function stopStream() {
   cleanupSdpFile();
 }
 
-app.on('window-all-closed', () => app.quit());
+app.on('window-all-closed', () => {
+  // Clean up before quitting
+  stopStream();
+  app.quit();
+});
+
+// Handle app quit
+app.on('before-quit', () => {
+  stopStream();
+});
+
+// Handle process termination
+process.on('SIGINT', () => {
+  stopStream();
+  process.exit(0);
+});
+
+process.on('SIGTERM', () => {
+  stopStream();
+  process.exit(0);
+});
+
+// Safe function to send messages to renderer
+function safeSendToRenderer(channel, data) {
+  if (win && !win.isDestroyed() && !isWindowDestroyed) {
+    try {
+      win.webContents.send(channel, data);
+    } catch (error) {
+      console.log('Window destroyed, cannot send message');
+    }
+  }
+}
