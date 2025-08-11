@@ -1,9 +1,56 @@
 const { app, BrowserWindow, ipcMain } = require('electron');
 const path = require('path');
 const { spawn } = require('child_process');
+const fs = require('fs');
+const os = require('os');
 
 let win;
 let ffmpegProc;
+let currentSdpFile = null;
+
+// Generate SDP file content for RTP stream
+function generateSdpContent(address, port) {
+  return `v=0
+o=- 0 0 IN IP4 ${address}
+s=RTP Multicast Stream
+c=IN IP4 ${address}/32
+t=0 0
+m=audio ${port} RTP/AVP 96
+a=rtpmap:96 opus/48000/1
+a=ptime:20
+a=maxptime:40`;
+}
+
+// Create temporary SDP file
+function createSdpFile(address, port) {
+  const sdpContent = generateSdpContent(address, port);
+  const tempDir = os.tmpdir();
+  const sdpFileName = `stream_${Date.now()}.sdp`;
+  const sdpFilePath = path.join(tempDir, sdpFileName);
+  
+  try {
+    fs.writeFileSync(sdpFilePath, sdpContent);
+    console.log('SDP file created:', sdpFilePath);
+    console.log('SDP content:', sdpContent);
+    return sdpFilePath;
+  } catch (error) {
+    console.error('Failed to create SDP file:', error);
+    throw error;
+  }
+}
+
+// Clean up SDP file
+function cleanupSdpFile() {
+  if (currentSdpFile && fs.existsSync(currentSdpFile)) {
+    try {
+      fs.unlinkSync(currentSdpFile);
+      console.log('SDP file cleaned up:', currentSdpFile);
+      currentSdpFile = null;
+    } catch (error) {
+      console.error('Failed to cleanup SDP file:', error);
+    }
+  }
+}
 
 // Get correct ffmpeg path depending on dev or packaged mode
 function getFFmpegPath() {
@@ -37,39 +84,52 @@ app.whenReady().then(createWindow);
 ipcMain.handle('start-stream', (_, { address, port }) => {
   stopStream();
 
-  const args = [
-    '-protocol_whitelist', 'file,udp,rtp',
-    '-i', `rtp://@${address}:${port}`,
-    '-acodec', 'pcm_s16le',
-    '-ar', '48000',
-    '-ac', '1',
-    '-f', 'wav',
-    'pipe:1'
-  ];
+  try {
+    // Create SDP file for the stream
+    currentSdpFile = createSdpFile(address, port);
+    
+    const args = [
+      '-protocol_whitelist', 'file,udp,rtp',
+      '-i', currentSdpFile,
+      '-acodec', 'pcm_s16le',
+      '-ar', '48000',
+      '-ac', '1',
+      '-f', 'wav',
+      'pipe:1'
+    ];
 
-  const ffmpegPath = getFFmpegPath();
-  console.log('Platform:', process.platform);
-  console.log('Is Packaged:', app.isPackaged);
-  console.log('Launching ffmpeg from:', ffmpegPath);
+    const ffmpegPath = getFFmpegPath();
+    console.log('Platform:', process.platform);
+    console.log('Is Packaged:', app.isPackaged);
+    console.log('Launching ffmpeg from:', ffmpegPath);
+    console.log('Using SDP file:', currentSdpFile);
 
-  ffmpegProc = spawn(ffmpegPath, args);
+    ffmpegProc = spawn(ffmpegPath, args);
 
-  ffmpegProc.stdout.on('data', chunk => {
-    win.webContents.send('audio-chunk', chunk.toString('base64'));
-  });
+    ffmpegProc.stdout.on('data', chunk => {
+      win.webContents.send('audio-chunk', chunk.toString('base64'));
+    });
 
-  ffmpegProc.stderr.on('data', data => {
-    win.webContents.send('log', data.toString());
-  });
+    ffmpegProc.stderr.on('data', data => {
+      win.webContents.send('log', data.toString());
+    });
 
-  ffmpegProc.on('error', (error) => {
-    console.error('FFmpeg spawn error:', error);
-    win.webContents.send('log', `FFmpeg Error: ${error.message}`);
-  });
+    ffmpegProc.on('error', (error) => {
+      console.error('FFmpeg spawn error:', error);
+      win.webContents.send('log', `FFmpeg Error: ${error.message}`);
+      cleanupSdpFile();
+    });
 
-  ffmpegProc.on('close', () => {
-    win.webContents.send('log', 'Stream stopped');
-  });
+    ffmpegProc.on('close', () => {
+      win.webContents.send('log', 'Stream stopped');
+      cleanupSdpFile();
+    });
+    
+  } catch (error) {
+    console.error('Failed to start stream:', error);
+    win.webContents.send('log', `Failed to start stream: ${error.message}`);
+    cleanupSdpFile();
+  }
 });
 
 ipcMain.handle('stop-stream', () => {
@@ -81,6 +141,7 @@ function stopStream() {
     ffmpegProc.kill();
     ffmpegProc = null;
   }
+  cleanupSdpFile();
 }
 
 app.on('window-all-closed', () => app.quit());
